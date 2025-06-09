@@ -211,7 +211,7 @@ dispatcher.add_handler(MessageHandler(Filters.voice, handle_voice))
 def index():
     return "✅ Toxic Scan Bot is live!"
 
-@app.route(f"/{TOKEN}", methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(update)
