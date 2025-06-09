@@ -24,12 +24,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # --------- Load tokenizer from JSON ---------
-with open(r'Toxic-scan-Telegram-Bot-main\tokenizer_clean.json', 'r', encoding='utf-8') as f:
+with open(r'tokenizer_clean.json', 'r', encoding='utf-8') as f:
     tokenizer_json = f.read()
 tokenizer = tokenizer_from_json(tokenizer_json)
 
 # --------- Load model ---------
-model = load_model(r'Toxic-scan-Telegram-Bot-main\toxic_classifier_lstm.h5')
+model = load_model(r'toxic_classifier_lstm.h5')
 MAX_LEN = 100
 
 # --------- PostgreSQL setup ---------
