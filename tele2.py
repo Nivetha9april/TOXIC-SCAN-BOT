@@ -1,11 +1,13 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timedelta
 
 import psycopg2
 import speech_recognition as sr
 from pydub import AudioSegment
+from flask import Flask
 from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
@@ -248,9 +250,19 @@ def handle_voice(update: Update, context: CallbackContext):
 
     update_user_record(user_id, username, toxic_count, blocked_until)
 
-# --------- Main ---------
-def main():
-    # Load Telegram token
+# --------- Flask web server ---------
+app = Flask(__name__)
+
+@app.route("/")
+def home():
+    return "Toxic Scan Telegram Bot is running!"
+
+def run_flask():
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
+
+# --------- Bot runner ---------
+def run_bot():
     TOKEN = os.getenv("TELEGRAM_TOKEN")
     if not TOKEN:
         raise ValueError("TELEGRAM_TOKEN is not set")
@@ -266,5 +278,6 @@ def main():
     updater.start_polling()
     updater.idle()
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    threading.Thread(target=run_flask).start()
+    run_bot()
