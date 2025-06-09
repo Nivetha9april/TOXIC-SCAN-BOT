@@ -1,3 +1,4 @@
+Flask
 python-dotenv
 numpy==1.26.4
 tensorflow==2.19.0
