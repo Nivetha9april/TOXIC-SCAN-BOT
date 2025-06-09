@@ -1,16 +1,14 @@
-import json
-import logging
 import os
-import threading
+import logging
 from datetime import datetime, timedelta
 
 import psycopg2
 import speech_recognition as sr
 from pydub import AudioSegment
-from flask import Flask
-from telegram import Update
-from telegram.error import BadRequest
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+from flask import Flask, request
+from telegram import Bot, Update
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters
+
 from tensorflow.keras.models import load_model
 from tensorflow.keras.preprocessing.sequence import pad_sequences
 from tensorflow.keras.preprocessing.text import tokenizer_from_json
@@ -18,23 +16,23 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --------- Logging setup ---------
+# --- Logging setup ---
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# --------- Load tokenizer from JSON ---------
-with open(r'tokenizer_clean.json', 'r', encoding='utf-8') as f:
+# --- Load tokenizer ---
+with open('tokenizer_clean.json', 'r', encoding='utf-8') as f:
     tokenizer_json = f.read()
 tokenizer = tokenizer_from_json(tokenizer_json)
 
-# --------- Load model ---------
-model = load_model(r'toxic_classifier_lstm.h5')
+# --- Load model ---
+model = load_model('toxic_classifier_lstm.h5')
 MAX_LEN = 100
 
-# --------- PostgreSQL setup ---------
+# --- PostgreSQL setup ---
 import urllib.parse as urlparse
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -63,23 +61,21 @@ def connect_db():
 def ensure_connection():
     global conn, cursor
     try:
-        # This polls the connection status to check if still alive
         conn.poll()
     except Exception:
-        logger.warning("Lost database connection. Reconnecting...")
+        logger.warning("Lost DB connection, reconnecting...")
         connect_db()
 
-# Initialize DB connection once
 connect_db()
 
-# --------- Database functions ---------
+# --- DB functions ---
 def get_user_record(user_id):
     try:
         ensure_connection()
         cursor.execute("SELECT toxic_count, blocked_until FROM toxic_users WHERE user_id = %s", (user_id,))
         return cursor.fetchone()
     except Exception as e:
-        logger.error(f"DB error in get_user_record: {e}")
+        logger.error(f"DB error get_user_record: {e}")
         return None
 
 def update_user_record(user_id, username, toxic_count, blocked_until):
@@ -95,30 +91,29 @@ def update_user_record(user_id, username, toxic_count, blocked_until):
         """, (user_id, username, toxic_count, blocked_until))
         conn.commit()
     except Exception as e:
-        logger.error(f"DB error in update_user_record: {e}")
+        logger.error(f"DB error update_user_record: {e}")
 
-# --------- Toxicity detection ---------
+# --- Toxicity detection ---
 def detect_toxicity(text):
-    sequence = tokenizer.texts_to_sequences([text])
-    padded = pad_sequences(sequence, maxlen=MAX_LEN)
-    prediction = model.predict(padded)[0][0]
-    logger.info(f"Toxicity prediction for '{text}': {prediction:.4f}")
-    return 1 if prediction > 0.5 else 0  # 1 = toxic, 0 = non-toxic
+    seq = tokenizer.texts_to_sequences([text])
+    padded = pad_sequences(seq, maxlen=MAX_LEN)
+    pred = model.predict(padded)[0][0]
+    logger.info(f"Toxicity prediction for '{text}': {pred:.4f}")
+    return 1 if pred > 0.5 else 0
 
-# --------- Simple explainability ---------
+# --- Explainability ---
 TOXIC_KEYWORDS = {'hate', 'stupid', 'idiot', 'dumb', 'kill', 'trash', 'ugly'}
-
 def explain_toxicity(text):
     words = text.split()
     highlighted = []
     for w in words:
         if w.lower() in TOXIC_KEYWORDS:
-            highlighted.append(f"**{w}**")  # Bold toxic words
+            highlighted.append(f"**{w}**")
         else:
             highlighted.append(w)
     return ' '.join(highlighted)
 
-# --------- Speech to text ---------
+# --- Speech to text ---
 def speech_to_text(file_path):
     wav_path = file_path.replace('.ogg', '.wav')
     try:
@@ -134,21 +129,21 @@ def speech_to_text(file_path):
             audio = r.record(source)
         text = r.recognize_google(audio)
     except sr.UnknownValueError:
-        logger.warning("Google Speech Recognition could not understand audio")
+        logger.warning("Could not understand audio")
         text = ""
     except sr.RequestError as e:
-        logger.error(f"Could not request results from Google Speech Recognition service; {e}")
+        logger.error(f"Google Speech API error: {e}")
         text = ""
     finally:
         if os.path.exists(wav_path):
             os.remove(wav_path)
     return text
 
-# --------- Telegram bot handlers ---------
-def start(update: Update, context: CallbackContext):
+# --- Telegram handlers ---
+def start(update, context):
     update.message.reply_text("👋 Welcome! Send me text or voice messages and I'll check for toxicity.")
 
-def handle_text(update: Update, context: CallbackContext):
+def handle_text(update, context):
     user_id = str(update.message.from_user.id)
     username = update.message.from_user.username or update.message.from_user.first_name
     text = update.message.text
@@ -165,21 +160,19 @@ def handle_text(update: Update, context: CallbackContext):
         if blocked_until and now < blocked_until:
             try:
                 context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except BadRequest:
+            except Exception:
                 pass
             update.message.reply_text(f"⛔ You're blocked until {blocked_until.strftime('%Y-%m-%d %H:%M:%S')}")
             return
 
-    prediction = detect_toxicity(text)
+    pred = detect_toxicity(text)
 
-    if prediction == 1:
+    if pred == 1:
         toxic_count += 1
-
         try:
             context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-        except BadRequest:
+        except Exception:
             pass
-
         explanation = explain_toxicity(text)
         update.message.reply_text(f"🚫 Toxic message removed. Explanation:\n{explanation}")
 
@@ -193,7 +186,7 @@ def handle_text(update: Update, context: CallbackContext):
 
     update_user_record(user_id, username, toxic_count, blocked_until)
 
-def handle_voice(update: Update, context: CallbackContext):
+def handle_voice(update, context):
     user_id = str(update.message.from_user.id)
     username = update.message.from_user.username or update.message.from_user.first_name
     now = datetime.now()
@@ -209,7 +202,7 @@ def handle_voice(update: Update, context: CallbackContext):
         if blocked_until and now < blocked_until:
             try:
                 context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-            except BadRequest:
+            except Exception:
                 pass
             update.message.reply_text(f"⛔ You're blocked until {blocked_until.strftime('%Y-%m-%d %H:%M:%S')}")
             return
@@ -222,7 +215,7 @@ def handle_voice(update: Update, context: CallbackContext):
 
     try:
         context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except BadRequest:
+    except Exception:
         pass
 
     if os.path.exists(ogg_path):
@@ -232,11 +225,10 @@ def handle_voice(update: Update, context: CallbackContext):
         update.message.reply_text("❓ Could not understand your voice message.")
         return
 
-    prediction = detect_toxicity(text)
+    pred = detect_toxicity(text)
 
-    if prediction == 1:
+    if pred == 1:
         toxic_count += 1
-
         explanation = explain_toxicity(text)
         update.message.reply_text(f"🚫 Toxic voice message removed. Explanation:\n{explanation}")
 
@@ -250,34 +242,29 @@ def handle_voice(update: Update, context: CallbackContext):
 
     update_user_record(user_id, username, toxic_count, blocked_until)
 
-# --------- Flask web server ---------
+# --- Flask app ---
 app = Flask(__name__)
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TOKEN:
+    raise ValueError("TELEGRAM_TOKEN is not set")
+bot = Bot(TOKEN)
+dispatcher = Dispatcher(bot, None, workers=0, use_context=True)
+
+# Register handlers
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+dispatcher.add_handler(MessageHandler(Filters.voice, handle_voice))
 
 @app.route("/")
-def home():
+def index():
     return "Toxic Scan Telegram Bot is running!"
 
-def run_flask():
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
-
-# --------- Bot runner ---------
-def run_bot():
-    TOKEN = os.getenv("TELEGRAM_TOKEN")
-    if not TOKEN:
-        raise ValueError("TELEGRAM_TOKEN is not set")
-
-    updater = Updater(TOKEN, use_context=True)
-    dp = updater.dispatcher
-
-    dp.add_handler(CommandHandler("start", start))
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
-    dp.add_handler(MessageHandler(Filters.voice, handle_voice))
-
-    logger.info("Bot started. Waiting for messages...")
-    updater.start_polling()
-    updater.idle()
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), bot)
+    dispatcher.process_update(update)
+    return "ok"
 
 if __name__ == "__main__":
-    threading.Thread(target=run_flask).start()
-    run_bot()
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
